@@ -45,7 +45,6 @@ func cloneFlags(cmd *cobra.Command) {
 
 	common.DefineCreateDefaults(&podClone.InfraOptions)
 	common.DefineCreateFlags(cmd, &podClone.InfraOptions, true, false)
-
 	podClone.InfraOptions.MemorySwappiness = -1 // this is not implemented for pods yet, need to set -1 default manually
 
 	// need to fill an empty ctr create option for each container for sane defaults
