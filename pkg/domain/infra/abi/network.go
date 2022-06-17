@@ -21,16 +21,28 @@ func (ic *ContainerEngine) NetworkList(ctx context.Context, options entities.Net
 	if filterDangling {
 		switch len(val) {
 		case 0:
+<<<<<<< HEAD
 			return nil, fmt.Errorf("got no values for filter key \"dangling\"")
+=======
+			return nil, errors.Errorf("got no values for filter key \"dangling\"")
+>>>>>>> 3681f4285 (allow filter networks by dangling status)
 		case 1:
 			var err error
 			wantDangling, err = strconv.ParseBool(val[0])
 			if err != nil {
+<<<<<<< HEAD
 				return nil, fmt.Errorf("invalid dangling filter value \"%v\"", val[0])
 			}
 			delete(options.Filters, "dangling")
 		default:
 			return nil, fmt.Errorf("got more than one value for filter key \"dangling\"")
+=======
+				return nil, errors.Errorf("invalid dangling filter value \"%v\"", val[0])
+			}
+			delete(options.Filters, "dangling")
+		default:
+			return nil, errors.Errorf("got more than one value for filter key \"dangling\"")
+>>>>>>> 3681f4285 (allow filter networks by dangling status)
 		}
 	}
 
