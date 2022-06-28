@@ -50,7 +50,9 @@ var (
 )
 
 var (
-	stopOptions = entities.StopOptions{}
+	stopOptions = entities.StopOptions{
+		Filters: make(map[string][]string),
+	}
 	stopTimeout uint
 )
 
@@ -67,6 +69,10 @@ func stopFlags(cmd *cobra.Command) {
 	timeFlagName := "time"
 	flags.UintVarP(&stopTimeout, timeFlagName, "t", containerConfig.Engine.StopTimeout, "Seconds to wait for stop before killing the container")
 	_ = cmd.RegisterFlagCompletionFunc(timeFlagName, completion.AutocompleteNone)
+
+	filterFlagName := "filter"
+	flags.StringSliceVarP(&filters, filterFlagName, "f", []string{}, "Filter output based on conditions given")
+	_ = cmd.RegisterFlagCompletionFunc(filterFlagName, common.AutocompletePsFilters)
 
 	if registry.IsRemote() {
 		_ = flags.MarkHidden("cidfile")
@@ -98,7 +104,6 @@ func stop(cmd *cobra.Command, args []string) error {
 	if cmd.Flag("time").Changed {
 		stopOptions.Timeout = &stopTimeout
 	}
-
 	for _, cidFile := range cidFiles {
 		content, err := ioutil.ReadFile(cidFile)
 		if err != nil {
@@ -107,7 +112,19 @@ func stop(cmd *cobra.Command, args []string) error {
 		id := strings.Split(string(content), "\n")[0]
 		args = append(args, id)
 	}
-
+	if len(filters) > 0 {
+		for _, f := range filters {
+			split := strings.SplitN(f, "=", 2)
+			if len(split) == 1 {
+				return errors.Errorf("invalid filter %q", f)
+			}
+			stopOptions.Filters[split[0]] = append(stopOptions.Filters[split[0]], split[1])
+		}
+		if len(args) > 0 {
+			return errors.Errorf("no arguments are needed with --filter")
+		}
+		stopOptions.All = true
+	}
 	responses, err := registry.ContainerEngine().ContainerStop(context.Background(), args, stopOptions)
 	if err != nil {
 		return err

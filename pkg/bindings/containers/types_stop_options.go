@@ -17,6 +17,21 @@ func (o *StopOptions) ToParams() (url.Values, error) {
 	return util.ToParams(o)
 }
 
+// WithFilters set field Filters to given value
+func (o *StopOptions) WithFilters(value map[string][]string) *StopOptions {
+	o.Filters = value
+	return o
+}
+
+// GetFilters returns value of field Filters
+func (o *StopOptions) GetFilters() map[string][]string {
+	if o.Filters == nil {
+		var z map[string][]string
+		return z
+	}
+	return o.Filters
+}
+
 // WithIgnore set field Ignore to given value
 func (o *StopOptions) WithIgnore(value bool) *StopOptions {
 	o.Ignore = &value

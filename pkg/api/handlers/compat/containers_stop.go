@@ -22,9 +22,10 @@ func StopContainer(w http.ResponseWriter, r *http.Request) {
 
 	// /{version}/containers/(name)/stop
 	query := struct {
-		Ignore        bool `schema:"ignore"`
-		DockerTimeout uint `schema:"t"`
-		LibpodTimeout uint `schema:"timeout"`
+		Ignore        bool                `schema:"ignore"`
+		DockerTimeout uint                `schema:"t"`
+		LibpodTimeout uint                `schema:"timeout"`
+		Filter        map[string][]string `schema:"filters"`
 	}{
 		// override any golang type defaults
 	}
@@ -34,9 +35,9 @@ func StopContainer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := utils.GetName(r)
-
 	options := entities.StopOptions{
-		Ignore: query.Ignore,
+		Ignore:  query.Ignore,
+		Filters: query.Filter,
 	}
 	if utils.IsLibpodRequest(r) {
 		if _, found := r.URL.Query()["timeout"]; found {

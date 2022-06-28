@@ -37,12 +37,30 @@ import (
 )
 
 // getContainersAndInputByContext gets containers whether all, latest, or a slice of names/ids
-// is specified.  It also returns a list of the corresponding input name used to look up each container.
-func getContainersAndInputByContext(all, latest bool, names []string, runtime *libpod.Runtime) (ctrs []*libpod.Container, rawInput []string, err error) {
+// is specified.  It also returns a list of the corresponding input name used to lookup each container.
+func getContainersAndInputByContext(all, latest bool, names []string, filter map[string][]string, runtime *libpod.Runtime) (ctrs []*libpod.Container, rawInput []string, err error) {
 	var ctr *libpod.Container
 	ctrs = []*libpod.Container{}
+	filterFuncs := make([]libpod.ContainerFilter, 0, len(filter))
 
 	switch {
+	case len(filter) > 0:
+		for k, v := range filter {
+			generatedFunc, err := dfilters.GenerateContainerFilterFuncs(k, v, runtime)
+			if err != nil {
+				return nil, nil, err
+			}
+			filterFuncs = append(filterFuncs, generatedFunc)
+		}
+		ctrs, err = runtime.GetContainers(filterFuncs...)
+
+		if err != nil {
+			return nil, nil, err
+		}
+		rawInput = []string{}
+		for _, candidate := range ctrs {
+			rawInput = append(rawInput, candidate.ID())
+		}
 	case all:
 		ctrs, err = runtime.GetAllContainers()
 	case latest:
@@ -72,7 +90,7 @@ func getContainersAndInputByContext(all, latest bool, names []string, runtime *l
 // getContainersByContext gets containers whether all, latest, or a slice of names/ids
 // is specified.
 func getContainersByContext(all, latest bool, names []string, runtime *libpod.Runtime) (ctrs []*libpod.Container, err error) {
-	ctrs, _, err = getContainersAndInputByContext(all, latest, names, runtime)
+	ctrs, _, err = getContainersAndInputByContext(all, latest, names, nil, runtime)
 	return
 }
 
@@ -146,8 +164,7 @@ func (ic *ContainerEngine) ContainerUnpause(ctx context.Context, namesOrIds []st
 	return report, nil
 }
 func (ic *ContainerEngine) ContainerStop(ctx context.Context, namesOrIds []string, options entities.StopOptions) ([]*entities.StopReport, error) {
-	names := namesOrIds
-	ctrs, rawInputs, err := getContainersAndInputByContext(options.All, options.Latest, names, ic.Libpod)
+	ctrs, rawInputs, err := getContainersAndInputByContext(options.All, options.Latest, namesOrIds, options.Filters, ic.Libpod)
 	if err != nil && !(options.Ignore && errors.Cause(err) == define.ErrNoSuchCtr) {
 		return nil, err
 	}
@@ -225,7 +242,7 @@ func (ic *ContainerEngine) ContainerKill(ctx context.Context, namesOrIds []strin
 	if err != nil {
 		return nil, err
 	}
-	ctrs, rawInputs, err := getContainersAndInputByContext(options.All, options.Latest, namesOrIds, ic.Libpod)
+	ctrs, rawInputs, err := getContainersAndInputByContext(options.All, options.Latest, namesOrIds, nil, ic.Libpod)
 	if err != nil {
 		return nil, err
 	}
@@ -872,7 +889,7 @@ func (ic *ContainerEngine) ContainerStart(ctx context.Context, namesOrIds []stri
 			}
 		}
 	}
-	ctrs, rawInputs, err := getContainersAndInputByContext(all, options.Latest, containersNamesOrIds, ic.Libpod)
+	ctrs, rawInputs, err := getContainersAndInputByContext(all, options.Latest, containersNamesOrIds, options.Filters, ic.Libpod)
 	if err != nil {
 		return nil, err
 	}
@@ -1651,4 +1668,26 @@ func (ic *ContainerEngine) ContainerClone(ctx context.Context, ctrCloneOpts enti
 	}
 
 	return &entities.ContainerCreateReport{Id: ctr.ID()}, nil
+}
+
+func ContainerFilter(ic *ContainerEngine, ctx context.Context, all bool, namesOrIds []string, filter map[string][]string) ([]string, error) {
+	listOptions := new(entities.ContainerListOptions)
+	listOptions.Filters = filter
+	filteredContainers, err := ic.ContainerList(ctx, *listOptions)
+	if err != nil {
+		return nil, err
+	}
+	containersNamesOrIds := []string{}
+	for _, v := range filteredContainers {
+		if all {
+			containersNamesOrIds = append(containersNamesOrIds, v.ID)
+			continue
+		}
+		for _, nameOrID := range namesOrIds {
+			if nameOrID == v.ID {
+				containersNamesOrIds = append(containersNamesOrIds, v.ID)
+			}
+		}
+	}
+	return containersNamesOrIds, err
 }
