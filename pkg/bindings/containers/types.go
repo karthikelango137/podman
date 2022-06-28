@@ -211,6 +211,7 @@ type WaitOptions struct {
 //go:generate go run ../generator/generator.go StopOptions
 // StopOptions are optional options for stopping containers
 type StopOptions struct {
+	Filters map[string][]string
 	Ignore  *bool
 	Timeout *uint
 }

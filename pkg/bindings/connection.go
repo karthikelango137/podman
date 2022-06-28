@@ -322,9 +322,7 @@ func (c *Connection) DoRequest(ctx context.Context, httpBody io.Reader, httpMeth
 		err      error
 		response *http.Response
 	)
-
 	params := make([]interface{}, len(pathValues)+1)
-
 	if v := headers.Values("API-Version"); len(v) > 0 {
 		params[0] = v[0]
 	} else {

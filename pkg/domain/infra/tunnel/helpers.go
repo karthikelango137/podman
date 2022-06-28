@@ -14,15 +14,15 @@ import (
 // FIXME: the `ignore` parameter is very likely wrong here as it should rather
 //        be used on *errors* from operations such as remove.
 func getContainersByContext(contextWithConnection context.Context, all, ignore bool, namesOrIDs []string) ([]entities.ListContainer, error) {
-	ctrs, _, err := getContainersAndInputByContext(contextWithConnection, all, ignore, namesOrIDs)
+	ctrs, _, err := getContainersAndInputByContext(contextWithConnection, all, ignore, namesOrIDs, nil)
 	return ctrs, err
 }
 
-func getContainersAndInputByContext(contextWithConnection context.Context, all, ignore bool, namesOrIDs []string) ([]entities.ListContainer, []string, error) {
+func getContainersAndInputByContext(contextWithConnection context.Context, all, ignore bool, namesOrIDs []string, filter map[string][]string) ([]entities.ListContainer, []string, error) {
 	if all && len(namesOrIDs) > 0 {
 		return nil, nil, errors.New("cannot look up containers and all")
 	}
-	options := new(containers.ListOptions).WithAll(true).WithSync(true)
+	options := new(containers.ListOptions).WithAll(true).WithSync(true).WithFilters(filter)
 	allContainers, err := containers.List(contextWithConnection, options)
 	if err != nil {
 		return nil, nil, err
