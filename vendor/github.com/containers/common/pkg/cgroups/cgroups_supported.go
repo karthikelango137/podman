@@ -5,6 +5,7 @@ package cgroups
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -15,7 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
 )
 
@@ -88,7 +88,7 @@ func UserOwnsCurrentSystemdCgroup() (bool, error) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return false, errors.Wrapf(err, "parsing file /proc/self/cgroup")
+		return false, fmt.Errorf("parsing file /proc/self/cgroup: %w", err)
 	}
 	return true, nil
 }
@@ -99,7 +99,7 @@ func UserOwnsCurrentSystemdCgroup() (bool, error) {
 func rmDirRecursively(path string) error {
 	killProcesses := func(signal syscall.Signal) {
 		if signal == unix.SIGKILL {
-			if err := ioutil.WriteFile(filepath.Join(path, "cgroup.kill"), []byte("1"), 0600); err == nil {
+			if err := ioutil.WriteFile(filepath.Join(path, "cgroup.kill"), []byte("1"), 0o600); err == nil {
 				return
 			}
 		}
@@ -113,7 +113,7 @@ func rmDirRecursively(path string) error {
 		}
 	}
 
-	if err := os.Remove(path); err == nil || os.IsNotExist(err) {
+	if err := os.Remove(path); err == nil || errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	entries, err := ioutil.ReadDir(path)
@@ -131,7 +131,7 @@ func rmDirRecursively(path string) error {
 	attempts := 0
 	for {
 		err := os.Remove(path)
-		if err == nil || os.IsNotExist(err) {
+		if err == nil || errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		if errors.Is(err, unix.EBUSY) {
@@ -150,6 +150,6 @@ func rmDirRecursively(path string) error {
 				continue
 			}
 		}
-		return errors.Wrapf(err, "remove %s", path)
+		return fmt.Errorf("remove %s: %w", path, err)
 	}
 }
