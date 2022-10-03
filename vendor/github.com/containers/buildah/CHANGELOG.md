@@ -2,10 +2,106 @@
 
 # Changelog
 
-## v1.26.1 (2022-05-04)
+## v1.28.0 (2022-09-30)
 
-    Make `buildah build --label foo` create an empty "foo" label again
-    Bump to v1.27.0-dev
+    Update vendor containers/(common,image)
+    [CI:DOCS] Add quay-description update reminder
+    vendor: bump c/common to v0.49.2-0.20220929111928-2d1b45ae2423
+    build(deps): bump github.com/opencontainers/selinux
+    Vendor in latest containers/storage
+    Changing shell list operators from `;` to `&&`
+    Fix buildahimage container.conf permissions regression
+    Set sysctls from containers.conf
+    refactor: stop using Normalize directly from containerd package
+    config,builder: process variant while populating image spec
+    Proof of concept: nightly dependency treadmill
+    Run codespell on code
+    Check for unset build args after TARGET args
+    pkg/cli: improve completion test
+    vendor in latest containers/(common,storage,image)
+    copier: work around freebsd bug for "mkdir /"
+    vendor: update c/image
+    test: run in the host cgroup namespace
+    vendor: update c/storage
+    vendor: update c/common
+    cmd: check for user UID instead of privileges
+    run,build: conflict --isolation=chroot and --network
+    Fix broken dns test (from merge collision)
+    Fix stutters
+    Fix broken command completion
+    buildah bud --network=none should have no network
+    build: support --skip-unused-stages for multi-stage builds
+    Prevent use of --dns* options with --net=none
+    buildah: make --cache-ttl=0s equivalent to --no-cache
+    parse: make processing flags in --mount order agnostic
+    Minor test fix for podman-remote
+    build: honor <Containerfile>.containerignore as ignore file
+    Update install.md: Debian 11 (Bullseye) is stable
+    build(deps): bump github.com/docker/docker
+    Use constants from containers/common for finding seccomp.json
+    Don't call os.Exit(1) from manifest exist
+    manifest: add support for buildah manifest exists
+    Buildah should ignore /etc/crio/seccomp.json
+    chroot: Fix cross build break
+    chroot: Move isDevNull to run_common.go
+    chroot: Fix setRlimit build on FreeBSD
+    chroot: Move parseRLimits and setRlimits to run_common.go
+    chroot: Fix runUsingChrootExecMain on FreeBSD
+    chroot: Move runUsingChrootExecMain to run_common.go
+    chroot: Factor out Linux-specific unshare options from runUsingChroot
+    chroot: Move runUsingChroot to run_common.go
+    chroot: Move RunUsingChroot and runUsingChrootMain to run_common.go
+    chroot: Factor out /dev/ptmx pty implementation
+    chroot: Add FreeBSD support for run with chroot isolation
+    build(deps): bump github.com/docker/go-units from 0.4.0 to 0.5.0
+    Replace k8s.gcr.io/pause in tests with registry.k8s.io/pause
+    build(deps): bump github.com/onsi/gomega from 1.20.0 to 1.20.1
+    Cirrus: use image with fewer downloaded dependencies
+    build(deps): bump github.com/opencontainers/runc from 1.1.3 to 1.1.4
+    run: add container gid to additional groups
+    buildah: support for --retry and --retry-delay for push/pull failures
+    Makefile: always call $(GO) instead of `go`
+    build(deps): bump github.com/fsouza/go-dockerclient from 1.8.2 to 1.8.3
+    test: use `T.TempDir` to create temporary test directory
+    mount,cache: enable SElinux shared content label option by default
+    commit: use race-free RemoveNames instead of SetNames
+    Drop util/util.Cause()
+    cmd/buildah: add "manifest create --amend"
+    build(deps): bump github.com/fsouza/go-dockerclient from 1.8.1 to 1.8.2
+    docs: specify git protocol is not supported for github hosted repo
+    Scrub user and group names from layer diffs
+    build(deps): bump github.com/containerd/containerd from 1.6.6 to 1.6.8
+    version: bump to 1.28.0-dev
+
+## v1.27.0 (2022-08-01)
+
+    build: support filtering cache by duration using `--cache-ttl`.
+    build: support building from commit when using git repo as build context.
+    build: clean up git repos correctly when using subdirs.
+    build: add support for distributing cache to remote sources using `--cache-to` and `--cache-from`.
+    imagebuildah: optimize cache hits for `COPY` and `ADD` instructions.
+    build: support OCI hooks for ephemeral build containers.
+    build: add support for `--userns=auto`.
+    copier: add NoOverwriteNonDirDir option .
+    add initial support for building images using Buildah on FreeBSD.
+    multistage: this now skips the computing of unwanted stages to improve performance.
+    multiarch: support splitting build logs for `--platform` using `--logsplit`.
+    build: add support for building images where the base image has no history.
+    commit: allow disabling image history with `--omit-history`.
+    build: add support for renaming a device in rootless setups.
+    build: now supports additionalBuildContext in builds via the `--build-context` option.
+    build: `--output` produces artifacts even if the build container is not committed.
+    build: now accepts `-cpp-flag`, allowing users to pass in CPP flags when processing a Containerfile with C Preprocessor-like syntax.
+    build: now accepts a branch and a subdirectory when the build context is a git repository.
+    build: output now shows a progress bar while pushing and pulling images
+    build: now errors out if the path to Containerfile is a directory.
+    build: support building container images on environments that are rootless and without any valid login sessions.
+    fix: `--output` now generates artifacts even if the entire build is cached.
+    fix: `--output` generates artifacts only for the target stage in multi-stage builds.
+    fix,add: now fails on a bad HTTP response instead of writing to container
+    fix,squash: never use build cache when computing the last step of the last stage
+    fix,build,run: allow reusing secret more than once in different RUN steps
+    fix: compatibility with Docker build by making its --label and --annotate options set empty labels and annotations when given a name but no `=` or label value.
 
 ## v1.26.0 (2022-05-04)
 
