@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 
+	"errors"
+
 	"github.com/containers/buildah/internal"
 	internalUtil "github.com/containers/buildah/internal/util"
 	"github.com/containers/common/pkg/parse"
@@ -16,7 +18,7 @@ import (
 	"github.com/containers/storage/pkg/idtools"
 	"github.com/containers/storage/pkg/lockfile"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/pkg/errors"
+	selinux "github.com/opencontainers/selinux/go-selinux"
 )
 
 const (
@@ -57,6 +59,9 @@ func GetBindMount(ctx *types.SystemContext, args []string, contextDir string, st
 	for _, val := range args {
 		kv := strings.SplitN(val, "=", 2)
 		switch kv[0] {
+		case "type":
+			// This is already processed
+			continue
 		case "bind-nonrecursive":
 			newMount.Options = append(newMount.Options, "bind")
 			bindNonRecursive = true
@@ -76,22 +81,22 @@ func GetBindMount(ctx *types.SystemContext, args []string, contextDir string, st
 			newMount.Options = append(newMount.Options, kv[0])
 		case "from":
 			if len(kv) == 1 {
-				return newMount, "", errors.Wrapf(errBadOptionArg, kv[0])
+				return newMount, "", fmt.Errorf("%v: %w", kv[0], errBadOptionArg)
 			}
 			fromImage = kv[1]
 		case "bind-propagation":
 			if len(kv) == 1 {
-				return newMount, "", errors.Wrapf(errBadOptionArg, kv[0])
+				return newMount, "", fmt.Errorf("%v: %w", kv[0], errBadOptionArg)
 			}
 			newMount.Options = append(newMount.Options, kv[1])
 		case "src", "source":
 			if len(kv) == 1 {
-				return newMount, "", errors.Wrapf(errBadOptionArg, kv[0])
+				return newMount, "", fmt.Errorf("%v: %w", kv[0], errBadOptionArg)
 			}
 			newMount.Source = kv[1]
 		case "target", "dst", "destination":
 			if len(kv) == 1 {
-				return newMount, "", errors.Wrapf(errBadOptionArg, kv[0])
+				return newMount, "", fmt.Errorf("%v: %w", kv[0], errBadOptionArg)
 			}
 			if err := parse.ValidateVolumeCtrDir(kv[1]); err != nil {
 				return newMount, "", err
@@ -103,7 +108,7 @@ func GetBindMount(ctx *types.SystemContext, args []string, contextDir string, st
 			// and can thus be safely ignored.
 			// See also the handling of the equivalent "delegated" and "cached" in ValidateVolumeOpts
 		default:
-			return newMount, "", errors.Wrapf(errBadMntOption, kv[0])
+			return newMount, "", fmt.Errorf("%v: %w", kv[0], errBadMntOption)
 		}
 	}
 
@@ -184,9 +189,10 @@ func GetCacheMount(args []string, store storage.Store, imageMountLabel string, a
 	var mode uint64
 	lockedTargets := make([]string, 0)
 	var (
-		setDest     bool
-		setShared   bool
-		setReadOnly bool
+		setDest           bool
+		setShared         bool
+		setReadOnly       bool
+		foundSElinuxLabel bool
 	)
 	fromStage := ""
 	newMount := specs.Mount{
@@ -206,6 +212,9 @@ func GetCacheMount(args []string, store storage.Store, imageMountLabel string, a
 	for _, val := range args {
 		kv := strings.SplitN(val, "=", 2)
 		switch kv[0] {
+		case "type":
+			// This is already processed
+			continue
 		case "nosuid", "nodev", "noexec":
 			// TODO: detect duplication of these options.
 			// (Is this necessary?)
@@ -216,29 +225,32 @@ func GetCacheMount(args []string, store storage.Store, imageMountLabel string, a
 			// Alias for "ro"
 			newMount.Options = append(newMount.Options, "ro")
 			setReadOnly = true
-		case "shared", "rshared", "private", "rprivate", "slave", "rslave", "Z", "z", "U":
+		case "Z", "z":
+			newMount.Options = append(newMount.Options, kv[0])
+			foundSElinuxLabel = true
+		case "shared", "rshared", "private", "rprivate", "slave", "rslave", "U":
 			newMount.Options = append(newMount.Options, kv[0])
 			setShared = true
 		case "sharing":
 			sharing = kv[1]
 		case "bind-propagation":
 			if len(kv) == 1 {
-				return newMount, lockedTargets, errors.Wrapf(errBadOptionArg, kv[0])
+				return newMount, lockedTargets, fmt.Errorf("%v: %w", kv[0], errBadOptionArg)
 			}
 			newMount.Options = append(newMount.Options, kv[1])
 		case "id":
 			if len(kv) == 1 {
-				return newMount, lockedTargets, errors.Wrapf(errBadOptionArg, kv[0])
+				return newMount, lockedTargets, fmt.Errorf("%v: %w", kv[0], errBadOptionArg)
 			}
 			id = kv[1]
 		case "from":
 			if len(kv) == 1 {
-				return newMount, lockedTargets, errors.Wrapf(errBadOptionArg, kv[0])
+				return newMount, lockedTargets, fmt.Errorf("%v: %w", kv[0], errBadOptionArg)
 			}
 			fromStage = kv[1]
 		case "target", "dst", "destination":
 			if len(kv) == 1 {
-				return newMount, lockedTargets, errors.Wrapf(errBadOptionArg, kv[0])
+				return newMount, lockedTargets, fmt.Errorf("%v: %w", kv[0], errBadOptionArg)
 			}
 			if err := parse.ValidateVolumeCtrDir(kv[1]); err != nil {
 				return newMount, lockedTargets, err
@@ -247,36 +259,42 @@ func GetCacheMount(args []string, store storage.Store, imageMountLabel string, a
 			setDest = true
 		case "src", "source":
 			if len(kv) == 1 {
-				return newMount, lockedTargets, errors.Wrapf(errBadOptionArg, kv[0])
+				return newMount, lockedTargets, fmt.Errorf("%v: %w", kv[0], errBadOptionArg)
 			}
 			newMount.Source = kv[1]
 		case "mode":
 			if len(kv) == 1 {
-				return newMount, lockedTargets, errors.Wrapf(errBadOptionArg, kv[0])
+				return newMount, lockedTargets, fmt.Errorf("%v: %w", kv[0], errBadOptionArg)
 			}
 			mode, err = strconv.ParseUint(kv[1], 8, 32)
 			if err != nil {
-				return newMount, lockedTargets, errors.Wrapf(err, "Unable to parse cache mode")
+				return newMount, lockedTargets, fmt.Errorf("unable to parse cache mode: %w", err)
 			}
 		case "uid":
 			if len(kv) == 1 {
-				return newMount, lockedTargets, errors.Wrapf(errBadOptionArg, kv[0])
+				return newMount, lockedTargets, fmt.Errorf("%v: %w", kv[0], errBadOptionArg)
 			}
 			uid, err = strconv.Atoi(kv[1])
 			if err != nil {
-				return newMount, lockedTargets, errors.Wrapf(err, "Unable to parse cache uid")
+				return newMount, lockedTargets, fmt.Errorf("unable to parse cache uid: %w", err)
 			}
 		case "gid":
 			if len(kv) == 1 {
-				return newMount, lockedTargets, errors.Wrapf(errBadOptionArg, kv[0])
+				return newMount, lockedTargets, fmt.Errorf("%v: %w", kv[0], errBadOptionArg)
 			}
 			gid, err = strconv.Atoi(kv[1])
 			if err != nil {
-				return newMount, lockedTargets, errors.Wrapf(err, "Unable to parse cache gid")
+				return newMount, lockedTargets, fmt.Errorf("unable to parse cache gid: %w", err)
 			}
 		default:
-			return newMount, lockedTargets, errors.Wrapf(errBadMntOption, kv[0])
+			return newMount, lockedTargets, fmt.Errorf("%v: %w", kv[0], errBadMntOption)
 		}
+	}
+
+	// If selinux is enabled and no selinux option was configured
+	// default to `z` i.e shared content label.
+	if !foundSElinuxLabel && (selinux.EnforceMode() != selinux.Disabled) && fromStage == "" {
+		newMount.Options = append(newMount.Options, "z")
 	}
 
 	if !setDest {
@@ -309,11 +327,11 @@ func GetCacheMount(args []string, store storage.Store, imageMountLabel string, a
 		// add subdirectory if specified
 
 		// cache parent directory
-		cacheParent := filepath.Join(getTempDir(), BuildahCacheDir)
+		cacheParent := filepath.Join(internalUtil.GetTempDir(), BuildahCacheDir)
 		// create cache on host if not present
 		err = os.MkdirAll(cacheParent, os.FileMode(0755))
 		if err != nil {
-			return newMount, lockedTargets, errors.Wrapf(err, "Unable to create build cache directory")
+			return newMount, lockedTargets, fmt.Errorf("unable to create build cache directory: %w", err)
 		}
 
 		if id != "" {
@@ -328,7 +346,7 @@ func GetCacheMount(args []string, store storage.Store, imageMountLabel string, a
 		//buildkit parity: change uid and gid if specified otheriwise keep `0`
 		err = idtools.MkdirAllAndChownNew(newMount.Source, os.FileMode(mode), idPair)
 		if err != nil {
-			return newMount, lockedTargets, errors.Wrapf(err, "Unable to change uid,gid of cache directory")
+			return newMount, lockedTargets, fmt.Errorf("unable to change uid,gid of cache directory: %w", err)
 		}
 	}
 
@@ -337,7 +355,7 @@ func GetCacheMount(args []string, store storage.Store, imageMountLabel string, a
 		// lock parent cache
 		lockfile, err := lockfile.GetLockfile(filepath.Join(newMount.Source, BuildahCacheLockfile))
 		if err != nil {
-			return newMount, lockedTargets, errors.Wrapf(err, "Unable to acquire lock when sharing mode is locked")
+			return newMount, lockedTargets, fmt.Errorf("unable to acquire lock when sharing mode is locked: %w", err)
 		}
 		// Will be unlocked after the RUN step is executed.
 		lockfile.Lock()
@@ -347,7 +365,7 @@ func GetCacheMount(args []string, store storage.Store, imageMountLabel string, a
 		break
 	default:
 		// error out for unknown values
-		return newMount, lockedTargets, errors.Wrapf(err, "Unrecognized value %q for field `sharing`", sharing)
+		return newMount, lockedTargets, fmt.Errorf("unrecognized value %q for field `sharing`: %w", sharing, err)
 	}
 
 	// buildkit parity: default sharing should be shared
@@ -375,10 +393,10 @@ func GetCacheMount(args []string, store storage.Store, imageMountLabel string, a
 // ValidateVolumeMountHostDir validates the host path of buildah --volume
 func ValidateVolumeMountHostDir(hostDir string) error {
 	if !filepath.IsAbs(hostDir) {
-		return errors.Errorf("invalid host path, must be an absolute path %q", hostDir)
+		return fmt.Errorf("invalid host path, must be an absolute path %q", hostDir)
 	}
 	if _, err := os.Stat(hostDir); err != nil {
-		return errors.WithStack(err)
+		return err
 	}
 	return nil
 }
@@ -421,7 +439,7 @@ func getVolumeMounts(volumes []string) (map[string]specs.Mount, error) {
 			return nil, err
 		}
 		if _, ok := finalVolumeMounts[volumeMount.Destination]; ok {
-			return nil, errors.Wrapf(errDuplicateDest, volumeMount.Destination)
+			return nil, fmt.Errorf("%v: %w", volumeMount.Destination, errDuplicateDest)
 		}
 		finalVolumeMounts[volumeMount.Destination] = volumeMount
 	}
@@ -433,7 +451,7 @@ func Volume(volume string) (specs.Mount, error) {
 	mount := specs.Mount{}
 	arr := SplitStringWithColonEscape(volume)
 	if len(arr) < 2 {
-		return mount, errors.Errorf("incorrect volume format %q, should be host-dir:ctr-dir[:option]", volume)
+		return mount, fmt.Errorf("incorrect volume format %q, should be host-dir:ctr-dir[:option]", volume)
 	}
 	if err := ValidateVolumeMountHostDir(arr[0]); err != nil {
 		return mount, err
@@ -468,7 +486,7 @@ func GetVolumes(ctx *types.SystemContext, store storage.Store, volumes []string,
 	}
 	for dest, mount := range volumeMounts {
 		if _, ok := unifiedMounts[dest]; ok {
-			return nil, mountedImages, lockedTargets, errors.Wrapf(errDuplicateDest, dest)
+			return nil, mountedImages, lockedTargets, fmt.Errorf("%v: %w", dest, errDuplicateDest)
 		}
 		unifiedMounts[dest] = mount
 	}
@@ -485,36 +503,39 @@ func GetVolumes(ctx *types.SystemContext, store storage.Store, volumes []string,
 // buildah run --mount type=bind,src=/etc/resolv.conf,target=/etc/resolv.conf ...
 // buildah run --mount type=tmpfs,target=/dev/shm ...
 func getMounts(ctx *types.SystemContext, store storage.Store, mounts []string, contextDir string) (map[string]specs.Mount, []string, []string, error) {
+	// If `type` is not set default to "bind"
+	mountType := TypeBind
 	finalMounts := make(map[string]specs.Mount)
 	mountedImages := make([]string, 0)
 	lockedTargets := make([]string, 0)
 
-	errInvalidSyntax := errors.Errorf("incorrect mount format: should be --mount type=<bind|tmpfs>,[src=<host-dir>,]target=<ctr-dir>[,options]")
+	errInvalidSyntax := errors.New("incorrect mount format: should be --mount type=<bind|tmpfs>,[src=<host-dir>,]target=<ctr-dir>[,options]")
 
 	// TODO(vrothberg): the manual parsing can be replaced with a regular expression
 	//                  to allow a more robust parsing of the mount format and to give
 	//                  precise errors regarding supported format versus supported options.
 	for _, mount := range mounts {
-		arr := strings.SplitN(mount, ",", 2)
-		if len(arr) < 2 {
-			return nil, mountedImages, lockedTargets, errors.Wrapf(errInvalidSyntax, "%q", mount)
+		tokens := strings.Split(mount, ",")
+		if len(tokens) < 2 {
+			return nil, mountedImages, lockedTargets, fmt.Errorf("%q: %w", mount, errInvalidSyntax)
 		}
-		kv := strings.Split(arr[0], "=")
-		// TODO: type is not explicitly required in Docker.
-		// If not specified, it defaults to "volume".
-		if len(kv) != 2 || kv[0] != "type" {
-			return nil, mountedImages, lockedTargets, errors.Wrapf(errInvalidSyntax, "%q", mount)
+		for _, field := range tokens {
+			if strings.HasPrefix(field, "type=") {
+				kv := strings.Split(field, "=")
+				if len(kv) != 2 {
+					return nil, mountedImages, lockedTargets, fmt.Errorf("%q: %w", mount, errInvalidSyntax)
+				}
+				mountType = kv[1]
+			}
 		}
-
-		tokens := strings.Split(arr[1], ",")
-		switch kv[1] {
+		switch mountType {
 		case TypeBind:
 			mount, image, err := GetBindMount(ctx, tokens, contextDir, store, "", nil)
 			if err != nil {
 				return nil, mountedImages, lockedTargets, err
 			}
 			if _, ok := finalMounts[mount.Destination]; ok {
-				return nil, mountedImages, lockedTargets, errors.Wrapf(errDuplicateDest, mount.Destination)
+				return nil, mountedImages, lockedTargets, fmt.Errorf("%v: %w", mount.Destination, errDuplicateDest)
 			}
 			finalMounts[mount.Destination] = mount
 			mountedImages = append(mountedImages, image)
@@ -525,7 +546,7 @@ func getMounts(ctx *types.SystemContext, store storage.Store, mounts []string, c
 				return nil, mountedImages, lockedTargets, err
 			}
 			if _, ok := finalMounts[mount.Destination]; ok {
-				return nil, mountedImages, lockedTargets, errors.Wrapf(errDuplicateDest, mount.Destination)
+				return nil, mountedImages, lockedTargets, fmt.Errorf("%v: %w", mount.Destination, errDuplicateDest)
 			}
 			finalMounts[mount.Destination] = mount
 		case TypeTmpfs:
@@ -534,11 +555,11 @@ func getMounts(ctx *types.SystemContext, store storage.Store, mounts []string, c
 				return nil, mountedImages, lockedTargets, err
 			}
 			if _, ok := finalMounts[mount.Destination]; ok {
-				return nil, mountedImages, lockedTargets, errors.Wrapf(errDuplicateDest, mount.Destination)
+				return nil, mountedImages, lockedTargets, fmt.Errorf("%v: %w", mount.Destination, errDuplicateDest)
 			}
 			finalMounts[mount.Destination] = mount
 		default:
-			return nil, mountedImages, lockedTargets, errors.Errorf("invalid filesystem type %q", kv[1])
+			return nil, mountedImages, lockedTargets, fmt.Errorf("invalid filesystem type %q", mountType)
 		}
 	}
 
@@ -557,6 +578,9 @@ func GetTmpfsMount(args []string) (specs.Mount, error) {
 	for _, val := range args {
 		kv := strings.SplitN(val, "=", 2)
 		switch kv[0] {
+		case "type":
+			// This is already processed
+			continue
 		case "ro", "nosuid", "nodev", "noexec":
 			newMount.Options = append(newMount.Options, kv[0])
 		case "readonly":
@@ -567,19 +591,19 @@ func GetTmpfsMount(args []string) (specs.Mount, error) {
 			newMount.Options = append(newMount.Options, kv[0])
 		case "tmpfs-mode":
 			if len(kv) == 1 {
-				return newMount, errors.Wrapf(errBadOptionArg, kv[0])
+				return newMount, fmt.Errorf("%v: %w", kv[0], errBadOptionArg)
 			}
 			newMount.Options = append(newMount.Options, fmt.Sprintf("mode=%s", kv[1]))
 		case "tmpfs-size":
 			if len(kv) == 1 {
-				return newMount, errors.Wrapf(errBadOptionArg, kv[0])
+				return newMount, fmt.Errorf("%v: %w", kv[0], errBadOptionArg)
 			}
 			newMount.Options = append(newMount.Options, fmt.Sprintf("size=%s", kv[1]))
 		case "src", "source":
-			return newMount, errors.Errorf("source is not supported with tmpfs mounts")
+			return newMount, errors.New("source is not supported with tmpfs mounts")
 		case "target", "dst", "destination":
 			if len(kv) == 1 {
-				return newMount, errors.Wrapf(errBadOptionArg, kv[0])
+				return newMount, fmt.Errorf("%v: %w", kv[0], errBadOptionArg)
 			}
 			if err := parse.ValidateVolumeCtrDir(kv[1]); err != nil {
 				return newMount, err
@@ -587,7 +611,7 @@ func GetTmpfsMount(args []string) (specs.Mount, error) {
 			newMount.Destination = kv[1]
 			setDest = true
 		default:
-			return newMount, errors.Wrapf(errBadMntOption, kv[0])
+			return newMount, fmt.Errorf("%v: %w", kv[0], errBadMntOption)
 		}
 	}
 
@@ -596,13 +620,4 @@ func GetTmpfsMount(args []string) (specs.Mount, error) {
 	}
 
 	return newMount, nil
-}
-
-/* This is internal function and could be changed at any time */
-/* for external usage please refer to buildah/pkg/parse.GetTempDir() */
-func getTempDir() string {
-	if tmpdir, ok := os.LookupEnv("TMPDIR"); ok {
-		return tmpdir
-	}
-	return "/var/tmp"
 }
