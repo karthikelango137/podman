@@ -4,14 +4,15 @@
 package util
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
 	"syscall"
 
+	"github.com/containers/storage/pkg/homedir"
 	"github.com/containers/storage/pkg/unshare"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -31,7 +32,10 @@ func GetRuntimeDir() (string, error) {
 	var rootlessRuntimeDirError error
 
 	rootlessRuntimeDirOnce.Do(func() {
-		runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+		runtimeDir, err := homedir.GetRuntimeDir()
+		if err != nil {
+			logrus.Debug(err)
+		}
 		if runtimeDir != "" {
 			st, err := os.Stat(runtimeDir)
 			if err != nil {
@@ -72,7 +76,7 @@ func GetRuntimeDir() (string, error) {
 			}
 			resolvedHome, err := filepath.EvalSymlinks(home)
 			if err != nil {
-				rootlessRuntimeDirError = errors.Wrap(err, "cannot resolve home")
+				rootlessRuntimeDirError = fmt.Errorf("cannot resolve home: %w", err)
 				return
 			}
 			runtimeDir = filepath.Join(resolvedHome, "rundir")
