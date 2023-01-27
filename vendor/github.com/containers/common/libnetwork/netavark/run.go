@@ -1,5 +1,5 @@
-//go:build linux
-// +build linux
+//go:build linux || freebsd
+// +build linux freebsd
 
 package netavark
 
@@ -7,16 +7,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/containers/common/libnetwork/internal/util"
 	"github.com/containers/common/libnetwork/types"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
 type netavarkOptions struct {
 	types.NetworkOptions
 	Networks map[string]*types.Network `json:"network_info"`
+}
+
+func (n *netavarkNetwork) execUpdate(networkName string, networkDNSServers []string) error {
+	retErr := n.execNetavark([]string{"update", networkName, "--network-dns-servers", strings.Join(networkDNSServers, ",")}, nil, nil)
+	return retErr
 }
 
 // Setup will setup the container network namespace. It returns
@@ -42,7 +47,7 @@ func (n *netavarkNetwork) Setup(namespacePath string, options types.SetupOptions
 
 	netavarkOpts, err := n.convertNetOpts(options.NetworkOptions)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to convert net opts")
+		return nil, fmt.Errorf("failed to convert net opts: %w", err)
 	}
 
 	// Warn users if one or more networks have dns enabled
@@ -103,7 +108,7 @@ func (n *netavarkNetwork) Teardown(namespacePath string, options types.TeardownO
 
 	netavarkOpts, err := n.convertNetOpts(options.NetworkOptions)
 	if err != nil {
-		return errors.Wrap(err, "failed to convert net opts")
+		return fmt.Errorf("failed to convert net opts: %w", err)
 	}
 
 	retErr := n.execNetavark([]string{"teardown", namespacePath}, netavarkOpts, nil)
