@@ -17,7 +17,6 @@ import (
 	"github.com/containers/common/pkg/config"
 	"github.com/containers/storage/pkg/unshare"
 	"github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/pkg/errors"
 	"github.com/spf13/pflag"
 )
 
@@ -30,6 +29,7 @@ type LayerResults struct {
 // UserNSResults represents the results for the UserNS flags
 type UserNSResults struct {
 	UserNS            string
+	GroupAdd          []string
 	UserNSUIDMap      []string
 	UserNSGIDMap      []string
 	UserNSUIDMapUser  string
@@ -53,10 +53,14 @@ type BudResults struct {
 	Annotation          []string
 	Authfile            string
 	BuildArg            []string
-	CacheFrom           string
+	BuildContext        []string
+	CacheFrom           []string
+	CacheTo             []string
+	CacheTTL            string
 	CertDir             string
 	Compress            bool
 	Creds               string
+	CPPFlags            []string
 	DisableCompression  bool
 	DisableContentTrust bool
 	IgnoreFile          string
@@ -66,10 +70,13 @@ type BudResults struct {
 	Iidfile             string
 	Label               []string
 	Logfile             string
+	LogSplitByPlatform  bool
 	Manifest            string
 	NoHosts             bool
 	NoCache             bool
 	Timestamp           int64
+	OmitHistory         bool
+	OCIHooksDir         []string
 	Pull                string
 	PullAlways          bool
 	PullNever           bool
@@ -83,6 +90,7 @@ type BudResults struct {
 	SignaturePolicy     string
 	SignBy              string
 	Squash              bool
+	SkipUnusedStages    bool
 	Stdin               bool
 	Tag                 []string
 	BuildOutput         string
@@ -119,6 +127,8 @@ type FromAndBudResults struct {
 	Isolation      string
 	Memory         string
 	MemorySwap     string
+	Retry          int
+	RetryDelay     string
 	SecurityOpt    []string
 	ShmSize        string
 	Ulimit         []string
@@ -128,6 +138,7 @@ type FromAndBudResults struct {
 // GetUserNSFlags returns the common flags for usernamespace
 func GetUserNSFlags(flags *UserNSResults) pflag.FlagSet {
 	usernsFlags := pflag.FlagSet{}
+	usernsFlags.StringSliceVar(&flags.GroupAdd, "group-add", nil, "add additional groups to the primary container process. 'keep-groups' allows container processes to use supplementary groups.")
 	usernsFlags.StringVar(&flags.UserNS, "userns", "", "'container', `path` of user namespace to join, or 'host'")
 	usernsFlags.StringSliceVar(&flags.UserNSUIDMap, "userns-uid-map", []string{}, "`containerUID:hostUID:length` UID mapping to use in user namespace")
 	usernsFlags.StringSliceVar(&flags.UserNSGIDMap, "userns-gid-map", []string{}, "`containerGID:hostGID:length` GID mapping to use in user namespace")
@@ -139,6 +150,7 @@ func GetUserNSFlags(flags *UserNSResults) pflag.FlagSet {
 // GetUserNSFlagsCompletions returns the FlagCompletions for the userns flags
 func GetUserNSFlagsCompletions() commonComp.FlagCompletions {
 	flagCompletion := commonComp.FlagCompletions{}
+	flagCompletion["group-add"] = commonComp.AutocompleteNone
 	flagCompletion["userns"] = completion.AutocompleteNamespaceFlag
 	flagCompletion["userns-uid-map"] = commonComp.AutocompleteNone
 	flagCompletion["userns-gid-map"] = commonComp.AutocompleteNone
@@ -190,10 +202,15 @@ func GetBudFlags(flags *BudResults) pflag.FlagSet {
 	fs.String("arch", runtime.GOARCH, "set the ARCH of the image to the provided value instead of the architecture of the host")
 	fs.StringArrayVar(&flags.Annotation, "annotation", []string{}, "set metadata for an image (default [])")
 	fs.StringVar(&flags.Authfile, "authfile", "", "path of the authentication file.")
+	fs.StringArrayVar(&flags.OCIHooksDir, "hooks-dir", []string{}, "set the OCI hooks directory path (may be set multiple times)")
 	fs.StringArrayVar(&flags.BuildArg, "build-arg", []string{}, "`argument=value` to supply to the builder")
-	fs.StringVar(&flags.CacheFrom, "cache-from", "", "images to utilise as potential cache sources. The build process does not currently support caching so this is a NOOP.")
+	fs.StringArrayVar(&flags.BuildContext, "build-context", []string{}, "`argument=value` to supply additional build context to the builder")
+	fs.StringArrayVar(&flags.CacheFrom, "cache-from", []string{}, "remote repository list to utilise as potential cache source.")
+	fs.StringArrayVar(&flags.CacheTo, "cache-to", []string{}, "remote repository list to utilise as potential cache destination.")
+	fs.StringVar(&flags.CacheTTL, "cache-ttl", "", "only consider cache images under specified duration.")
 	fs.StringVar(&flags.CertDir, "cert-dir", "", "use certificates at the specified path to access the registry")
 	fs.BoolVar(&flags.Compress, "compress", false, "this is a legacy option, which has no effect on the image")
+	fs.StringArrayVar(&flags.CPPFlags, "cpp-flag", []string{}, "set additional flag to pass to C preprocessor (cpp)")
 	fs.StringVar(&flags.Creds, "creds", "", "use `[username[:password]]` for accessing the registry")
 	fs.BoolVarP(&flags.DisableCompression, "disable-compression", "D", true, "don't compress layers by default")
 	fs.BoolVar(&flags.DisableContentTrust, "disable-content-trust", false, "this is a Docker specific option and is a NOOP")
@@ -206,6 +223,7 @@ func GetBudFlags(flags *BudResults) pflag.FlagSet {
 	fs.IntVar(&flags.Jobs, "jobs", 1, "how many stages to run in parallel")
 	fs.StringArrayVar(&flags.Label, "label", []string{}, "set metadata for an image (default [])")
 	fs.StringVar(&flags.Logfile, "logfile", "", "log to `file` instead of stdout/stderr")
+	fs.BoolVar(&flags.LogSplitByPlatform, "logsplit", false, "split logfile to different files for each platform")
 	fs.Int("loglevel", 0, "NO LONGER USED, flag ignored, and hidden")
 	if err := fs.MarkHidden("loglevel"); err != nil {
 		panic(fmt.Sprintf("error marking the loglevel flag as hidden: %v", err))
@@ -235,7 +253,8 @@ func GetBudFlags(flags *BudResults) pflag.FlagSet {
 		panic(fmt.Sprintf("error marking the pull-never flag as hidden: %v", err))
 	}
 	fs.BoolVarP(&flags.Quiet, "quiet", "q", false, "refrain from announcing build instructions and image read/write progress")
-	fs.BoolVar(&flags.IdentityLabel, "identity-label", true, "add default identity label (default true)")
+	fs.BoolVar(&flags.OmitHistory, "omit-history", false, "omit build history information from built image")
+	fs.BoolVar(&flags.IdentityLabel, "identity-label", true, "add default identity label")
 	fs.BoolVar(&flags.Rm, "rm", true, "remove intermediate containers after a successful build")
 	// "runtime" definition moved to avoid name collision in podman build.  Defined in cmd/buildah/build.go.
 	fs.StringSliceVar(&flags.RuntimeFlags, "runtime-flag", []string{}, "add global flags for the container runtime")
@@ -245,6 +264,7 @@ func GetBudFlags(flags *BudResults) pflag.FlagSet {
 	if err := fs.MarkHidden("signature-policy"); err != nil {
 		panic(fmt.Sprintf("error marking the signature-policy flag as hidden: %v", err))
 	}
+	fs.BoolVar(&flags.SkipUnusedStages, "skip-unused-stages", true, "skips stages in multi-stage builds which do not affect the final target")
 	fs.BoolVar(&flags.Squash, "squash", false, "squash newly built layers into a single new layer")
 	fs.StringArrayVar(&flags.SSH, "ssh", []string{}, "SSH agent socket or keys to expose to the build. (format: default|<id>[=<socket>|<key>[,<key>]])")
 	fs.BoolVar(&flags.Stdin, "stdin", false, "pass stdin into containers")
@@ -261,17 +281,22 @@ func GetBudFlags(flags *BudResults) pflag.FlagSet {
 // GetBudFlagsCompletions returns the FlagCompletions for the common build flags
 func GetBudFlagsCompletions() commonComp.FlagCompletions {
 	flagCompletion := commonComp.FlagCompletions{}
-	flagCompletion["arch"] = commonComp.AutocompleteNone
 	flagCompletion["annotation"] = commonComp.AutocompleteNone
+	flagCompletion["arch"] = commonComp.AutocompleteNone
 	flagCompletion["authfile"] = commonComp.AutocompleteDefault
 	flagCompletion["build-arg"] = commonComp.AutocompleteNone
+	flagCompletion["build-context"] = commonComp.AutocompleteNone
 	flagCompletion["cache-from"] = commonComp.AutocompleteNone
+	flagCompletion["cache-to"] = commonComp.AutocompleteNone
+	flagCompletion["cache-ttl"] = commonComp.AutocompleteNone
 	flagCompletion["cert-dir"] = commonComp.AutocompleteDefault
+	flagCompletion["cpp-flag"] = commonComp.AutocompleteNone
 	flagCompletion["creds"] = commonComp.AutocompleteNone
 	flagCompletion["env"] = commonComp.AutocompleteNone
 	flagCompletion["file"] = commonComp.AutocompleteDefault
-	flagCompletion["from"] = commonComp.AutocompleteDefault
 	flagCompletion["format"] = commonComp.AutocompleteNone
+	flagCompletion["from"] = commonComp.AutocompleteDefault
+	flagCompletion["hooks-dir"] = commonComp.AutocompleteNone
 	flagCompletion["ignorefile"] = commonComp.AutocompleteDefault
 	flagCompletion["iidfile"] = commonComp.AutocompleteDefault
 	flagCompletion["jobs"] = commonComp.AutocompleteNone
@@ -281,18 +306,18 @@ func GetBudFlagsCompletions() commonComp.FlagCompletions {
 	flagCompletion["os"] = commonComp.AutocompleteNone
 	flagCompletion["os-feature"] = commonComp.AutocompleteNone
 	flagCompletion["os-version"] = commonComp.AutocompleteNone
+	flagCompletion["output"] = commonComp.AutocompleteNone
 	flagCompletion["pull"] = commonComp.AutocompleteDefault
 	flagCompletion["runtime-flag"] = commonComp.AutocompleteNone
 	flagCompletion["secret"] = commonComp.AutocompleteNone
-	flagCompletion["ssh"] = commonComp.AutocompleteNone
 	flagCompletion["sign-by"] = commonComp.AutocompleteNone
 	flagCompletion["signature-policy"] = commonComp.AutocompleteNone
+	flagCompletion["ssh"] = commonComp.AutocompleteNone
 	flagCompletion["tag"] = commonComp.AutocompleteNone
 	flagCompletion["target"] = commonComp.AutocompleteNone
 	flagCompletion["timestamp"] = commonComp.AutocompleteNone
-	flagCompletion["variant"] = commonComp.AutocompleteNone
 	flagCompletion["unsetenv"] = commonComp.AutocompleteNone
-	flagCompletion["output"] = commonComp.AutocompleteNone
+	flagCompletion["variant"] = commonComp.AutocompleteNone
 	return flagCompletion
 }
 
@@ -301,7 +326,7 @@ func GetFromAndBudFlags(flags *FromAndBudResults, usernsResults *UserNSResults, 
 	fs := pflag.FlagSet{}
 	defaultContainerConfig, err := config.Default()
 	if err != nil {
-		return fs, errors.Wrapf(err, "failed to get container config")
+		return fs, fmt.Errorf("failed to get container config: %w", err)
 	}
 
 	fs.StringSliceVar(&flags.AddHost, "add-host", []string{}, "add a custom host-to-IP mapping (`host:ip`) (default [])")
@@ -326,6 +351,8 @@ func GetFromAndBudFlags(flags *FromAndBudResults, usernsResults *UserNSResults, 
 	fs.StringVar(&flags.Isolation, "isolation", DefaultIsolation(), "`type` of process isolation to use. Use BUILDAH_ISOLATION environment variable to override.")
 	fs.StringVarP(&flags.Memory, "memory", "m", "", "memory limit (format: <number>[<unit>], where unit = b, k, m or g)")
 	fs.StringVar(&flags.MemorySwap, "memory-swap", "", "swap limit equal to memory plus swap: '-1' to enable unlimited swap")
+	fs.IntVar(&flags.Retry, "retry", MaxPullPushRetries, "number of times to retry in case of failure when performing push/pull")
+	fs.StringVar(&flags.RetryDelay, "retry-delay", PullPushRetryDelay.String(), "delay between retries in case of push/pull failures")
 	fs.String("arch", runtime.GOARCH, "set the ARCH of the image to the provided value instead of the architecture of the host")
 	fs.String("os", runtime.GOOS, "prefer `OS` instead of the running OS when pulling images")
 	fs.StringSlice("platform", []string{parse.DefaultPlatform()}, "set the OS/ARCH/VARIANT of the image to the provided value instead of the current operating system and architecture of the host (for example `linux/arm`)")
@@ -368,6 +395,8 @@ func GetFromAndBudFlagsCompletions() commonComp.FlagCompletions {
 	flagCompletion["memory-swap"] = commonComp.AutocompleteNone
 	flagCompletion["os"] = commonComp.AutocompleteNone
 	flagCompletion["platform"] = commonComp.AutocompleteNone
+	flagCompletion["retry"] = commonComp.AutocompleteNone
+	flagCompletion["retry-delay"] = commonComp.AutocompleteNone
 	flagCompletion["security-opt"] = commonComp.AutocompleteNone
 	flagCompletion["shm-size"] = commonComp.AutocompleteNone
 	flagCompletion["ulimit"] = commonComp.AutocompleteNone
@@ -430,13 +459,13 @@ func DefaultHistory() bool {
 func VerifyFlagsArgsOrder(args []string) error {
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "-") {
-			return errors.Errorf("No options (%s) can be specified after the image or container name", arg)
+			return fmt.Errorf("no options (%s) can be specified after the image or container name", arg)
 		}
 	}
 	return nil
 }
 
-// aliasFlags is a function to handle backwards compatibility with old flags
+// AliasFlags is a function to handle backwards compatibility with old flags
 func AliasFlags(f *pflag.FlagSet, name string) pflag.NormalizedName {
 	switch name {
 	case "net":

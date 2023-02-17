@@ -1,23 +1,27 @@
-//go:build linux
-// +build linux
+//go:build linux || freebsd
+// +build linux freebsd
 
 package cni
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"os"
 
 	internalutil "github.com/containers/common/libnetwork/internal/util"
 	"github.com/containers/common/libnetwork/types"
 	pkgutil "github.com/containers/common/pkg/util"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"github.com/vishvananda/netlink"
 )
+
+func (n *cniNetwork) NetworkUpdate(name string, options types.NetworkUpdateOptions) error {
+	return fmt.Errorf("NetworkUpdate is not supported for backend CNI: %w", types.ErrInvalidArg)
+}
 
 // NetworkCreate will take a partial filled Network and fill the
 // missing fields. It creates the Network and returns the full Network.
-func (n *cniNetwork) NetworkCreate(net types.Network) (types.Network, error) {
+func (n *cniNetwork) NetworkCreate(net types.Network, options *types.NetworkCreateOptions) (types.Network, error) {
 	n.lock.Lock()
 	defer n.lock.Unlock()
 	err := n.loadNetworks()
@@ -26,6 +30,11 @@ func (n *cniNetwork) NetworkCreate(net types.Network) (types.Network, error) {
 	}
 	network, err := n.networkCreate(&net, false)
 	if err != nil {
+		if options != nil && options.IgnoreIfExists && errors.Is(err, types.ErrNetworkExists) {
+			if network, ok := n.networks[net.Name]; ok {
+				return *network.libpodNet, nil
+			}
+		}
 		return types.Network{}, err
 	}
 	// add the new network to the map
@@ -36,6 +45,9 @@ func (n *cniNetwork) NetworkCreate(net types.Network) (types.Network, error) {
 // networkCreate will fill out the given network struct and return the new network entry.
 // If defaultNet is true it will not validate against used subnets and it will not write the cni config to disk.
 func (n *cniNetwork) networkCreate(newNetwork *types.Network, defaultNet bool) (*network, error) {
+	if len(newNetwork.NetworkDNSServers) > 0 {
+		return nil, fmt.Errorf("NetworkDNSServers cannot be configured for backend CNI: %w", types.ErrInvalidArg)
+	}
 	// if no driver is set use the default one
 	if newNetwork.Driver == "" {
 		newNetwork.Driver = types.DefaultNetworkDriver
@@ -44,7 +56,7 @@ func (n *cniNetwork) networkCreate(newNetwork *types.Network, defaultNet bool) (
 	// FIXME: Should we use a different type for network create without the ID field?
 	// the caller is not allowed to set a specific ID
 	if newNetwork.ID != "" {
-		return nil, errors.Wrap(types.ErrInvalidArg, "ID can not be set for network create")
+		return nil, fmt.Errorf("ID can not be set for network create: %w", types.ErrInvalidArg)
 	}
 
 	err := internalutil.CommonNetworkCreate(n, newNetwork)
@@ -84,7 +96,7 @@ func (n *cniNetwork) networkCreate(newNetwork *types.Network, defaultNet bool) (
 			return nil, err
 		}
 	default:
-		return nil, errors.Wrapf(types.ErrInvalidArg, "unsupported driver %s", newNetwork.Driver)
+		return nil, fmt.Errorf("unsupported driver %s: %w", newNetwork.Driver, types.ErrInvalidArg)
 	}
 
 	err = internalutil.ValidateSubnets(newNetwork, !newNetwork.Internal, usedNetworks)
@@ -128,19 +140,12 @@ func (n *cniNetwork) NetworkRemove(nameOrID string) error {
 
 	// Removing the default network is not allowed.
 	if network.libpodNet.Name == n.defaultNetwork {
-		return errors.Errorf("default network %s cannot be removed", n.defaultNetwork)
+		return fmt.Errorf("default network %s cannot be removed", n.defaultNetwork)
 	}
 
 	// Remove the bridge network interface on the host.
 	if network.libpodNet.Driver == types.BridgeNetworkDriver {
-		link, err := netlink.LinkByName(network.libpodNet.NetworkInterface)
-		if err == nil {
-			err = netlink.LinkDel(link)
-			// only log the error, it is not fatal
-			if err != nil {
-				logrus.Infof("Failed to remove network interface %s: %v", network.libpodNet.NetworkInterface, err)
-			}
-		}
+		deleteLink(network.libpodNet.NetworkInterface)
 	}
 
 	file := network.filename
@@ -201,7 +206,7 @@ func createIPMACVLAN(network *types.Network) error {
 			return err
 		}
 		if !pkgutil.StringInSlice(network.NetworkInterface, interfaceNames) {
-			return errors.Errorf("parent interface %s does not exist", network.NetworkInterface)
+			return fmt.Errorf("parent interface %s does not exist", network.NetworkInterface)
 		}
 	}
 
@@ -232,10 +237,10 @@ func validateIPAMDriver(n *types.Network) error {
 	case "", types.HostLocalIPAMDriver:
 	case types.DHCPIPAMDriver, types.NoneIPAMDriver:
 		if len(n.Subnets) > 0 {
-			return errors.Errorf("%s ipam driver is set but subnets are given", ipamDriver)
+			return fmt.Errorf("%s ipam driver is set but subnets are given", ipamDriver)
 		}
 	default:
-		return errors.Errorf("unsupported ipam driver %q", ipamDriver)
+		return fmt.Errorf("unsupported ipam driver %q", ipamDriver)
 	}
 	return nil
 }

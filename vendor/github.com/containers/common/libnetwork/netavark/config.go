@@ -1,25 +1,87 @@
-//go:build linux
-// +build linux
+//go:build linux || freebsd
+// +build linux freebsd
 
 package netavark
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"time"
 
 	internalutil "github.com/containers/common/libnetwork/internal/util"
 	"github.com/containers/common/libnetwork/types"
 	"github.com/containers/common/pkg/util"
 	"github.com/containers/storage/pkg/stringid"
-	"github.com/pkg/errors"
 )
+
+func sliceRemoveDuplicates(strList []string) []string {
+	list := make([]string, 0, len(strList))
+	for _, item := range strList {
+		if !util.StringInSlice(item, list) {
+			list = append(list, item)
+		}
+	}
+	return list
+}
+
+func (n *netavarkNetwork) commitNetwork(network *types.Network) error {
+	confPath := filepath.Join(n.networkConfigDir, network.Name+".json")
+	f, err := os.Create(confPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "     ")
+	err = enc.Encode(network)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (n *netavarkNetwork) NetworkUpdate(name string, options types.NetworkUpdateOptions) error {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	err := n.loadNetworks()
+	if err != nil {
+		return err
+	}
+	network, err := n.getNetwork(name)
+	if err != nil {
+		return err
+	}
+	networkDNSServersBefore := network.NetworkDNSServers
+	networkDNSServersAfter := []string{}
+	for _, server := range networkDNSServersBefore {
+		if util.StringInSlice(server, options.RemoveDNSServers) {
+			continue
+		}
+		networkDNSServersAfter = append(networkDNSServersAfter, server)
+	}
+	networkDNSServersAfter = append(networkDNSServersAfter, options.AddDNSServers...)
+	networkDNSServersAfter = sliceRemoveDuplicates(networkDNSServersAfter)
+	network.NetworkDNSServers = networkDNSServersAfter
+	if reflect.DeepEqual(networkDNSServersBefore, networkDNSServersAfter) {
+		return nil
+	}
+	err = n.commitNetwork(network)
+	if err != nil {
+		return err
+	}
+
+	return n.execUpdate(network.Name, network.NetworkDNSServers)
+}
 
 // NetworkCreate will take a partial filled Network and fill the
 // missing fields. It creates the Network and returns the full Network.
-func (n *netavarkNetwork) NetworkCreate(net types.Network) (types.Network, error) {
+func (n *netavarkNetwork) NetworkCreate(net types.Network, options *types.NetworkCreateOptions) (types.Network, error) {
 	n.lock.Lock()
 	defer n.lock.Unlock()
 	err := n.loadNetworks()
@@ -28,6 +90,11 @@ func (n *netavarkNetwork) NetworkCreate(net types.Network) (types.Network, error
 	}
 	network, err := n.networkCreate(&net, false)
 	if err != nil {
+		if options != nil && options.IgnoreIfExists && errors.Is(err, types.ErrNetworkExists) {
+			if network, ok := n.networks[net.Name]; ok {
+				return *network, nil
+			}
+		}
 		return types.Network{}, err
 	}
 	// add the new network to the map
@@ -44,7 +111,7 @@ func (n *netavarkNetwork) networkCreate(newNetwork *types.Network, defaultNet bo
 		// FIXME: Should we use a different type for network create without the ID field?
 		// the caller is not allowed to set a specific ID
 		if newNetwork.ID != "" {
-			return nil, errors.Wrap(types.ErrInvalidArg, "ID can not be set for network create")
+			return nil, fmt.Errorf("ID can not be set for network create: %w", types.ErrInvalidArg)
 		}
 
 		// generate random network ID
@@ -95,20 +162,32 @@ func (n *netavarkNetwork) networkCreate(newNetwork *types.Network, defaultNet bo
 		// validate the given options, we do not need them but just check to make sure they are valid
 		for key, value := range newNetwork.Options {
 			switch key {
-			case "mtu":
+			case types.MTUOption:
 				_, err = internalutil.ParseMTU(value)
 				if err != nil {
 					return nil, err
 				}
 
-			case "vlan":
+			case types.VLANOption:
 				_, err = internalutil.ParseVlan(value)
 				if err != nil {
 					return nil, err
 				}
 
+			case types.IsolateOption:
+				val, err := strconv.ParseBool(value)
+				if err != nil {
+					return nil, err
+				}
+				// rust only support "true" or "false" while go can parse 1 and 0 as well so we need to change it
+				newNetwork.Options[types.IsolateOption] = strconv.FormatBool(val)
+			case types.MetricOption:
+				_, err := strconv.ParseUint(value, 10, 32)
+				if err != nil {
+					return nil, err
+				}
 			default:
-				return nil, errors.Errorf("unsupported bridge network option %s", key)
+				return nil, fmt.Errorf("unsupported bridge network option %s", key)
 			}
 		}
 	case types.MacVLANNetworkDriver:
@@ -117,11 +196,22 @@ func (n *netavarkNetwork) networkCreate(newNetwork *types.Network, defaultNet bo
 			return nil, err
 		}
 	default:
-		return nil, errors.Wrapf(types.ErrInvalidArg, "unsupported driver %s", newNetwork.Driver)
+		return nil, fmt.Errorf("unsupported driver %s: %w", newNetwork.Driver, types.ErrInvalidArg)
 	}
 
 	// when we do not have ipam we must disable dns
 	internalutil.IpamNoneDisableDNS(newNetwork)
+
+	// process NetworkDNSServers
+	if len(newNetwork.NetworkDNSServers) > 0 && !newNetwork.DNSEnabled {
+		return nil, fmt.Errorf("Cannot set NetworkDNSServers if DNS is not enabled for the network: %w", types.ErrInvalidArg)
+	}
+	// validate ip address
+	for _, dnsServer := range newNetwork.NetworkDNSServers {
+		if net.ParseIP(dnsServer) == nil {
+			return nil, fmt.Errorf("Unable to parse ip %s specified in NetworkDNSServers: %w", dnsServer, types.ErrInvalidArg)
+		}
+	}
 
 	// add gateway when not internal or dns enabled
 	addGateway := !newNetwork.Internal || newNetwork.DNSEnabled
@@ -133,15 +223,7 @@ func (n *netavarkNetwork) networkCreate(newNetwork *types.Network, defaultNet bo
 	newNetwork.Created = time.Now()
 
 	if !defaultNet {
-		confPath := filepath.Join(n.networkConfigDir, newNetwork.Name+".json")
-		f, err := os.Create(confPath)
-		if err != nil {
-			return nil, err
-		}
-		defer f.Close()
-		enc := json.NewEncoder(f)
-		enc.SetIndent("", "     ")
-		err = enc.Encode(newNetwork)
+		err = n.commitNetwork(newNetwork)
 		if err != nil {
 			return nil, err
 		}
@@ -157,37 +239,42 @@ func createMacvlan(network *types.Network) error {
 			return err
 		}
 		if !util.StringInSlice(network.NetworkInterface, interfaceNames) {
-			return errors.Errorf("parent interface %s does not exist", network.NetworkInterface)
+			return fmt.Errorf("parent interface %s does not exist", network.NetworkInterface)
 		}
 	}
+
+	// always turn dns off with macvlan, it is not implemented in netavark
+	// and makes little sense to support with macvlan
+	// see https://github.com/containers/netavark/pull/467
+	network.DNSEnabled = false
 
 	// we already validated the drivers before so we just have to set the default here
 	switch network.IPAMOptions[types.Driver] {
 	case "":
 		if len(network.Subnets) == 0 {
-			return errors.Errorf("macvlan driver needs at least one subnet specified, DHCP is not yet supported with netavark")
+			return fmt.Errorf("macvlan driver needs at least one subnet specified, DHCP is not yet supported with netavark")
 		}
 		network.IPAMOptions[types.Driver] = types.HostLocalIPAMDriver
 	case types.HostLocalIPAMDriver:
 		if len(network.Subnets) == 0 {
-			return errors.Errorf("macvlan driver needs at least one subnet specified, when the host-local ipam driver is set")
+			return fmt.Errorf("macvlan driver needs at least one subnet specified, when the host-local ipam driver is set")
 		}
 	}
 
 	// validate the given options, we do not need them but just check to make sure they are valid
 	for key, value := range network.Options {
 		switch key {
-		case "mode":
+		case types.ModeOption:
 			if !util.StringInSlice(value, types.ValidMacVLANModes) {
-				return errors.Errorf("unknown macvlan mode %q", value)
+				return fmt.Errorf("unknown macvlan mode %q", value)
 			}
-		case "mtu":
+		case types.MTUOption:
 			_, err := internalutil.ParseMTU(value)
 			if err != nil {
 				return err
 			}
 		default:
-			return errors.Errorf("unsupported macvlan network option %s", key)
+			return fmt.Errorf("unsupported macvlan network option %s", key)
 		}
 	}
 	return nil
@@ -210,7 +297,7 @@ func (n *netavarkNetwork) NetworkRemove(nameOrID string) error {
 
 	// Removing the default network is not allowed.
 	if network.Name == n.defaultNetwork {
-		return errors.Errorf("default network %s cannot be removed", n.defaultNetwork)
+		return fmt.Errorf("default network %s cannot be removed", n.defaultNetwork)
 	}
 
 	file := filepath.Join(n.networkConfigDir, network.Name+".json")
@@ -274,7 +361,7 @@ func validateIPAMDriver(n *types.Network) error {
 	case types.DHCPIPAMDriver:
 		return errors.New("dhcp ipam driver is not yet supported with netavark")
 	default:
-		return errors.Errorf("unsupported ipam driver %q", ipamDriver)
+		return fmt.Errorf("unsupported ipam driver %q", ipamDriver)
 	}
 	return nil
 }

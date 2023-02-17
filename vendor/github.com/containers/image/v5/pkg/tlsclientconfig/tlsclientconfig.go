@@ -2,6 +2,8 @@ package tlsclientconfig
 
 import (
 	"crypto/tls"
+	"crypto/x509"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -9,9 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/go-connections/sockets"
-	"github.com/docker/go-connections/tlsconfig"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -47,9 +46,9 @@ func SetupCertificates(dir string, tlsc *tls.Config) error {
 				return err
 			}
 			if tlsc.RootCAs == nil {
-				systemPool, err := tlsconfig.SystemCertPool()
+				systemPool, err := x509.SystemCertPool()
 				if err != nil {
-					return errors.Wrap(err, "unable to get system cert pool")
+					return fmt.Errorf("unable to get system cert pool: %w", err)
 				}
 				tlsc.RootCAs = systemPool
 			}
@@ -60,7 +59,7 @@ func SetupCertificates(dir string, tlsc *tls.Config) error {
 			keyName := certName[:len(certName)-5] + ".key"
 			logrus.Debugf(" cert: %s", fullPath)
 			if !hasFile(fs, keyName) {
-				return errors.Errorf("missing key %s for client certificate %s. Note that CA certificates should use the extension .crt", keyName, certName)
+				return fmt.Errorf("missing key %s for client certificate %s. Note that CA certificates should use the extension .crt", keyName, certName)
 			}
 			cert, err := tls.LoadX509KeyPair(filepath.Join(dir, certName), filepath.Join(dir, keyName))
 			if err != nil {
@@ -73,7 +72,7 @@ func SetupCertificates(dir string, tlsc *tls.Config) error {
 			certName := keyName[:len(keyName)-4] + ".cert"
 			logrus.Debugf(" key: %s", fullPath)
 			if !hasFile(fs, certName) {
-				return errors.Errorf("missing client certificate %s for key %s", certName, keyName)
+				return fmt.Errorf("missing client certificate %s for key %s", certName, keyName)
 			}
 		}
 	}
@@ -102,9 +101,6 @@ func NewTransport() *http.Transport {
 		TLSHandshakeTimeout: 10 * time.Second,
 		// TODO(dmcgowan): Call close idle connections when complete and use keep alive
 		DisableKeepAlives: true,
-	}
-	if _, err := sockets.DialerFromEnvironment(direct); err != nil {
-		logrus.Debugf("Can't execute DialerFromEnvironment: %v", err)
 	}
 	return tr
 }
