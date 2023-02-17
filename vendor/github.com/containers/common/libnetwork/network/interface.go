@@ -1,12 +1,11 @@
-//go:build linux
-// +build linux
+//go:build linux || freebsd
+// +build linux freebsd
 
 package network
 
 import (
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
@@ -25,14 +24,8 @@ import (
 const (
 	// defaultNetworkBackendFileName is the file name for sentinel file to store the backend
 	defaultNetworkBackendFileName = "defaultNetworkBackend"
-	// cniConfigDir is the directory where cni configuration is found
-	cniConfigDir = "/etc/cni/net.d/"
 	// cniConfigDirRootless is the directory in XDG_CONFIG_HOME for cni plugins
 	cniConfigDirRootless = "cni/net.d/"
-	// netavarkConfigDir is the config directory for the rootful network files
-	netavarkConfigDir = "/etc/containers/networks"
-	// netavarkRunDir is the run directory for the rootful temporary network files such as the ipam db
-	netavarkRunDir = "/run/containers/networks"
 
 	// netavarkBinary is the name of the netavark binary
 	netavarkBinary = "netavark"
@@ -43,11 +36,12 @@ const (
 // NetworkBackend returns the network backend name and interface
 // It returns either the CNI or netavark backend depending on what is set in the config.
 // If the the backend is set to "" we will automatically assign the backend on the following conditions:
-//   1. read ${graphroot}/defaultNetworkBackend
-//   2. find netavark binary (if not installed use CNI)
-//   3. check containers, images and CNI networks and if there are some we have an existing install and should continue to use CNI
+//  1. read ${graphroot}/defaultNetworkBackend
+//  2. find netavark binary (if not installed use CNI)
+//  3. check containers, images and CNI networks and if there are some we have an existing install and should continue to use CNI
 //
 // revive does not like the name because the package is already called network
+//
 //nolint:revive
 func NetworkBackend(store storage.Store, conf *config.Config, syslog bool) (types.NetworkBackend, types.ContainerNetwork, error) {
 	backend := types.NetworkBackend(conf.Network.NetworkBackend)
@@ -90,6 +84,7 @@ func NetworkBackend(store storage.Store, conf *config.Config, syslog bool) (type
 			DefaultNetwork:     conf.Network.DefaultNetwork,
 			DefaultSubnet:      conf.Network.DefaultSubnet,
 			DefaultsubnetPools: conf.Network.DefaultSubnetPools,
+			DNSBindPort:        conf.Network.DNSBindPort,
 			Syslog:             syslog,
 		})
 		return types.Netavark, netInt, err
@@ -105,7 +100,7 @@ func NetworkBackend(store storage.Store, conf *config.Config, syslog bool) (type
 func defaultNetworkBackend(store storage.Store, conf *config.Config) (backend types.NetworkBackend, err error) {
 	// read defaultNetworkBackend file
 	file := filepath.Join(store.GraphRoot(), defaultNetworkBackendFileName)
-	b, err := ioutil.ReadFile(file)
+	b, err := os.ReadFile(file)
 	if err == nil {
 		val := string(b)
 		if val == string(types.Netavark) {
@@ -137,36 +132,48 @@ func defaultNetworkBackend(store storage.Store, conf *config.Config) (backend ty
 		return types.CNI, nil
 	}
 
-	// now check if there are already containers, images and CNI networks (new install?)
+	// If there are any containers then return CNI
 	cons, err := store.Containers()
 	if err != nil {
 		return "", err
 	}
-	if len(cons) == 0 {
-		imgs, err := store.Images()
-		if err != nil {
-			return "", err
-		}
-		if len(imgs) == 0 {
-			cniInterface, err := getCniInterface(conf)
-			if err == nil {
-				nets, err := cniInterface.NetworkList()
-				// there is always a default network so check <= 1
-				if err == nil && len(nets) <= 1 {
-					// we have a fresh system so use netavark
-					return types.Netavark, nil
-				}
-			}
+	if len(cons) != 0 {
+		return types.CNI, nil
+	}
+
+	// If there are any non ReadOnly images then return CNI
+	imgs, err := store.Images()
+	if err != nil {
+		return "", err
+	}
+	for _, i := range imgs {
+		if !i.ReadOnly {
+			return types.CNI, nil
 		}
 	}
-	return types.CNI, nil
+
+	// If there are CNI Networks then return CNI
+	cniInterface, err := getCniInterface(conf)
+	if err == nil {
+		nets, err := cniInterface.NetworkList()
+		// there is always a default network so check > 1
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+
+		if len(nets) > 1 {
+			// we do not have a fresh system so use CNI
+			return types.CNI, nil
+		}
+	}
+	return types.Netavark, nil
 }
 
 func getCniInterface(conf *config.Config) (types.ContainerNetwork, error) {
 	confDir := conf.Network.NetworkConfigDir
 	if confDir == "" {
 		var err error
-		confDir, err = getDefultCNIConfigDir()
+		confDir, err = getDefaultCNIConfigDir()
 		if err != nil {
 			return nil, err
 		}
@@ -174,6 +181,7 @@ func getCniInterface(conf *config.Config) (types.ContainerNetwork, error) {
 	return cni.NewCNINetworkInterface(&cni.InitConfig{
 		CNIConfigDir:       confDir,
 		CNIPluginDirs:      conf.Network.CNIPluginDirs,
+		RunDir:             conf.Engine.TmpDir,
 		DefaultNetwork:     conf.Network.DefaultNetwork,
 		DefaultSubnet:      conf.Network.DefaultSubnet,
 		DefaultsubnetPools: conf.Network.DefaultSubnetPools,
@@ -181,7 +189,7 @@ func getCniInterface(conf *config.Config) (types.ContainerNetwork, error) {
 	})
 }
 
-func getDefultCNIConfigDir() (string, error) {
+func getDefaultCNIConfigDir() (string, error) {
 	if !unshare.IsRootless() {
 		return cniConfigDir, nil
 	}

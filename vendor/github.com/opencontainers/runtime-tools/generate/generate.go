@@ -42,7 +42,7 @@ type ExportOptions struct {
 // New creates a configuration Generator with the default
 // configuration for the target operating system.
 func New(os string) (generator Generator, err error) {
-	if os != "linux" && os != "solaris" && os != "windows" {
+	if os != "linux" && os != "solaris" && os != "windows" && os != "freebsd" {
 		return generator, fmt.Errorf("no defaults configured for %s", os)
 	}
 
@@ -72,7 +72,7 @@ func New(os string) (generator Generator, err error) {
 		}
 	}
 
-	if os == "linux" || os == "solaris" {
+	if os == "linux" || os == "solaris" || os == "freebsd" {
 		config.Process.User = rspec.User{}
 		config.Process.Env = []string{
 			"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -236,6 +236,21 @@ func New(os string) (generator Generator, err error) {
 				},
 			},
 			Seccomp: seccomp.DefaultProfile(&config),
+		}
+	} else if os == "freebsd" {
+		config.Mounts = []rspec.Mount{
+			{
+				Destination: "/dev",
+				Type:        "devfs",
+				Source:      "devfs",
+				Options:     []string{"ruleset=4"},
+			},
+			{
+				Destination: "/dev/fd",
+				Type:        "fdescfs",
+				Source:      "fdesc",
+				Options:     []string{},
+			},
 		}
 	}
 
@@ -1604,6 +1619,12 @@ func (g *Generator) SetDefaultSeccompAction(action string) error {
 func (g *Generator) SetDefaultSeccompActionForce(action string) error {
 	g.initConfigLinuxSeccomp()
 	return seccomp.ParseDefaultActionForce(action, g.Config.Linux.Seccomp)
+}
+
+// SetDomainName sets g.Config.Domainname
+func (g *Generator) SetDomainName(domain string) {
+	g.initConfig()
+	g.Config.Domainname = domain
 }
 
 // SetSeccompArchitecture sets the supported seccomp architectures
